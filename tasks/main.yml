@@ -1,0 +1,80 @@
+---
+# This role pulls src_file directly from src to dst to dst_dir using temorary ssh keys and scp.
+# Inventory must contain two nodes with variables: 
+#  copy_r2r_host_role=copy_r2r_dst
+#  copy_r2r_host_role=copy_r2r_src
+# Direct SSH connection between these nodes should be possible
+
+- name: delete tmp keys from dst host if present
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - ~/.ssh/copy_r2r_tmp_key
+    - ~/.ssh/copy_r2r_tmp_key.pub
+  when: copy_r2r_host_role == 'copy_r2r_dst'
+
+- name: create new tmp keys on dst
+  ansible.builtin.command: ssh-keygen -t ed25519 -f ~/.ssh/copy_r2r_tmp_key -q -N ""
+  when: copy_r2r_host_role == 'copy_r2r_dst'
+
+- name: copy tmp public key to control machine
+  ansible.builtin.fetch:
+    src: ~/.ssh/copy_r2r_tmp_key.pub
+    dest: /tmp/ansible_copy_r2r_dst_pubkey
+    flat: yes
+  when: copy_r2r_host_role == 'copy_r2r_dst'
+
+- name: add tmp public key to copy_r2r_src node authorized_hosts
+  ansible.posix.authorized_key:
+    user: root
+    state: present
+    key: "{{ lookup('file', '/tmp/ansible_copy_r2r_dst_pubkey') }}"
+  when: copy_r2r_host_role == 'copy_r2r_src'
+
+- name: save copy_r2r_scp node ip address in tmp file on control machine
+  become: false
+  ansible.builtin.shell: echo {{ inventory_hostname }} > /tmp/ansible_copy_r2r_src_hostname
+  delegate_to: localhost
+  when: copy_r2r_host_role == 'copy_r2r_src'
+
+- name: set fact with copy_r2r_src_hostname on copy_r2r_dst node
+  ansible.builtin.set_fact:
+    copy_r2r_src_hostname: "{{ lookup('file', '/tmp/ansible_copy_r2r_src_hostname') }}"
+  when: copy_r2r_host_role == 'copy_r2r_dst'
+
+- name: pull src_file from copy_r2r_src node to copy_r2r_dst node
+  ansible.builtin.command: >
+    scp -o StrictHostKeyChecking=no -o 
+    IdentitiesOnly=yes 
+    -i ~/.ssh/copy_r2r_tmp_key 
+    root@{{ copy_r2r_src_hostname }}:{{ src_file }} {{ dst_dir }}
+  register: scp_result
+  when: copy_r2r_host_role == 'copy_r2r_dst'
+
+- name: cleanup public key from copy_r2r_src node authorized_hosts
+  ansible.posix.authorized_key:
+    user: root
+    state: absent
+    key: "{{ lookup('file', '/tmp/ansible_copy_r2r_dst_pubkey') }}"
+  when: copy_r2r_host_role == 'copy_r2r_src'
+
+- name: cleanup tmp keys from  copy_r2r_dst node
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - ~/.ssh/copy_r2r_tmp_key
+    - ~/.ssh/copy_r2r_tmp_key.pub
+  when: copy_r2r_host_role == 'copy_r2r_dst'
+
+- name: cleanup tmp files on control node
+  become: false
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - /tmp/ansible_copy_r2r_dst_pubkey
+    - /tmp/ansible_copy_r2r_src_hostname
+  delegate_to: localhost
+  when: copy_r2r_host_role == 'copy_r2r_dst'
